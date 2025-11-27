@@ -33,7 +33,7 @@ from lib.tracker.video_pose_data import (
 
 USE_MULTIPROCESS = False
 POOL_SIZE = 8
-SCRIPT_NAME = "run_eval_unknown_delay"
+SCRIPT_NAME = "run_eval_delay_unknown"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
