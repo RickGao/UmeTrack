@@ -6,10 +6,11 @@
 
 from dataclasses import dataclass
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import time
 
 from . import model_utils
 from .feature_extractor import FeatureExtractor
@@ -121,8 +122,12 @@ class UmeTrackModel(nn.Module):
         return self._feature_extractor.input_image_sizes
 
     def _forward_feature_extractor(
-        self, frame_data: InputFrameData, sample_range: torch.Tensor
+        self,
+        frame_data: InputFrameData,
+        sample_range: torch.Tensor,
+        timing: Optional[Dict[str, float]] = None,
     ) -> torch.Tensor:
+        start_time = time.perf_counter() if timing is not None else None
         # Per-view img features
         per_view_img_features = self._feature_extractor._image_backbone(
             frame_data.left_images.unsqueeze(1)
@@ -165,15 +170,21 @@ class UmeTrackModel(nn.Module):
 
             img_features = torch.cat(img_features_list, dim=0)
 
+        if timing is not None and start_time is not None:
+            timing["feature_extractor"] = time.perf_counter() - start_time
         return img_features
 
     def _forward_feature_extractor_temporal(
-        self, frame_data: InputFrameData, frame_desc: InputFrameDesc
+        self,
+        frame_data: InputFrameData,
+        frame_desc: InputFrameDesc,
+        timing: Optional[Dict[str, float]] = None,
     ) -> torch.Tensor:
-        # Fused img features
         img_features = self._forward_feature_extractor(
-            frame_data, frame_desc.sample_range
+            frame_data, frame_desc.sample_range, timing=timing
         )
+        temporal_start = time.perf_counter() if timing is not None else None
+        # Fused img features
         extrinsics = _get_cam0_extrinsics(frame_data, frame_desc)
 
         # Temporal features
@@ -183,6 +194,8 @@ class UmeTrackModel(nn.Module):
             frame_desc.memory_idx,
             frame_desc.use_memory,
         )
+        if timing is not None and temporal_start is not None:
+            timing["temporal_rnn"] = time.perf_counter() - temporal_start
         return temporal_features
 
     def regress_pose_use_skeleton(
@@ -190,11 +203,13 @@ class UmeTrackModel(nn.Module):
         frame_data: InputFrameData,
         frame_desc: InputFrameDesc,
         skel_data: InputSkeletonData,
+        timing: Optional[Dict[str, float]] = None,
     ) -> Dict[str, torch.Tensor]:
         temporal_features = self._forward_feature_extractor_temporal(
-            frame_data, frame_desc
+            frame_data, frame_desc, timing=timing
         )
 
+        skel_start = time.perf_counter() if timing is not None else None
         skel_features = self._skeleton_enc.forward(
             joint_rotation_axes=skel_data.joint_rotation_axes,
             joint_rest_positions=skel_data.joint_rest_positions,
@@ -206,10 +221,16 @@ class UmeTrackModel(nn.Module):
                 temporal_features.shape[0], *skel_features.shape[1:]
             )
 
+        if timing is not None and skel_start is not None:
+            timing["skeleton_encoder"] = time.perf_counter() - skel_start
+
         # Concatenate along the channel dimension (1)
         img_skel_features = torch.cat([temporal_features, skel_features], dim=1)
 
+        reg_start = time.perf_counter() if timing is not None else None
         regression_output = self._regressor_k.regress_poses(img_skel_features)
+        if timing is not None and reg_start is not None:
+            timing["pose_regressor"] = time.perf_counter() - reg_start
 
         regression_output.wrist_xfs = _recover_wrist_xfs_in_world(
             frame_desc.hand_idx,
@@ -219,7 +240,10 @@ class UmeTrackModel(nn.Module):
         return regression_output
 
     def regress_pose_pred_skel_scale(
-        self, frame_data: InputFrameData, frame_desc: InputFrameDesc
+        self,
+        frame_data: InputFrameData,
+        frame_desc: InputFrameDesc,
+        timing: Optional[Dict[str, float]] = None,
     ) -> Dict[str, torch.Tensor]:
         singlev_masks = (
             frame_desc.sample_range[:, 1] - frame_desc.sample_range[:, 0]
@@ -228,7 +252,7 @@ class UmeTrackModel(nn.Module):
             singlev_masks.all()
         ), "Unsupported: found single-view samples when calibration scale"
         temporal_features = self._forward_feature_extractor_temporal(
-            frame_data, frame_desc
+            frame_data, frame_desc, timing=timing
         )
 
         regression_output = self._regressor_u.regress_poses(temporal_features)

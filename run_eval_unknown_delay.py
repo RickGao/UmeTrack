@@ -1,43 +1,60 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
-
+#
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
 import logging
 import os
-
-import av
 import fnmatch
 import pickle
-import numpy as np
-import torch
-import lib.data_utils.fs as fs
-from functools import partial
-from lib.tracker.perspective_crop import landmarks_from_hand_pose
-from lib.common.hand import NUM_HANDS, NUM_LANDMARKS_PER_HAND
-from lib.tracker.tracking_result import SingleHandPose
-from lib.common.hand import HandModel, scaled_hand_model
+import time
+from dataclasses import dataclass
 from multiprocessing import Pool
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
+import numpy as np
+
+import lib.data_utils.fs as fs
+from lib.common.delay_utils import (
+    TimingStats,
+    append_delay_log,
+    format_summary_lines,
+)
+from lib.common.hand import HandModel, NUM_HANDS, NUM_LANDMARKS_PER_HAND, scaled_hand_model
 from lib.models.model_loader import load_pretrained_model
-from lib.tracker.tracker import HandTracker, HandTrackerOpts, InputFrame, ViewData
-from lib.tracker.video_pose_data import SyncedImagePoseStream, _load_json, load_hand_model_from_dict
+from lib.tracker.perspective_crop import landmarks_from_hand_pose
+from lib.tracker.tracker import HandTracker, HandTrackerOpts
+from lib.tracker.video_pose_data import (
+    SyncedImagePoseStream,
+    _load_json,
+    load_hand_model_from_dict,
+)
 
-logging.basicConfig(level = logging.INFO)
+USE_MULTIPROCESS = True
+POOL_SIZE = 32
+SCRIPT_NAME = "run_eval_unknown_delay"
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SequenceResult:
+    video_path: str
+    per_frame_error: Optional[np.ndarray]
+    timing_stats: Optional[TimingStats]
 
 
 def _find_input_output_files(input_dir: str, output_dir: str, test_only: bool):
     res_input_paths = []
     res_output_paths = []
     for cur_dir, _, filenames in fs.walk(input_dir):
-        if test_only and not "testing" in cur_dir:
+        if test_only and "testing" not in cur_dir:
             continue
         mp4_files = fnmatch.filter(filenames, "*.mp4")
         input_full_paths = [fs.join(cur_dir, fname) for fname in mp4_files]
-        rel_paths = [f[len(input_dir):] for f in input_full_paths]
+        rel_paths = [f[len(input_dir) :] for f in input_full_paths]
         output_full_paths = [fs.join(output_dir, f[:-4] + ".npy") for f in rel_paths]
         res_input_paths += input_full_paths
         res_output_paths += output_full_paths
@@ -69,12 +86,14 @@ def _track_sequence_and_calibrate(
             predicted_scale_samples = predicted_scale_samples[:n_calibration_samples]
             break
 
-    assert len(predicted_scale_samples) > 0, "No samples collected for scale calibration!"
+    assert (
+        len(predicted_scale_samples) > 0
+    ), "No samples collected for scale calibration!"
     mean_scale = np.mean(predicted_scale_samples)
-    logger.info(f"Calibrated mean scale: {mean_scale} with {len(predicted_scale_samples)} samples")
-    calibrated_hand_model = scaled_hand_model(
-        generic_hand_model, mean_scale
+    logger.info(
+        f"Calibrated mean scale: {mean_scale} with {len(predicted_scale_samples)} samples"
     )
+    calibrated_hand_model = scaled_hand_model(generic_hand_model, mean_scale)
     return calibrated_hand_model
 
 
@@ -84,11 +103,13 @@ def _track_sequence(
     generic_hand_model: HandModel,
     n_calibration_samples: int,
     override: bool = False,
-) -> Optional[np.ndarray]:
+) -> SequenceResult:
     data_path, output_path = input_output
     if not override and fs.exists(output_path):
-        logger.info(f"Skipping '{data_path}' since output path '{output_path}' already exists")
-        return None
+        logger.info(
+            f"Skipping '{data_path}' since output path '{output_path}' already exists"
+        )
+        return SequenceResult(data_path, None, None)
 
     logger.info(f"Processing {data_path}...")
     model = load_pretrained_model(model_path)
@@ -101,14 +122,21 @@ def _track_sequence(
         image_pose_stream, tracker, generic_hand_model, n_calibration_samples
     )
 
-    # Reset the history and retrack using the calibrated skeleton.
     tracker.reset_history()
 
-    gt_keypoints = np.zeros([NUM_HANDS, len(image_pose_stream), NUM_LANDMARKS_PER_HAND, 3])
-    tracked_keypoints = np.zeros([NUM_HANDS, len(image_pose_stream), NUM_LANDMARKS_PER_HAND, 3])
+    gt_keypoints = np.zeros(
+        [NUM_HANDS, len(image_pose_stream), NUM_LANDMARKS_PER_HAND, 3]
+    )
+    tracked_keypoints = np.zeros_like(gt_keypoints)
     valid_tracking = np.zeros([NUM_HANDS, len(image_pose_stream)], dtype=bool)
+    video_stats = TimingStats()
+
     for frame_idx, (input_frame, gt_tracking) in enumerate(image_pose_stream):
         gt_hand_model = image_pose_stream._hand_pose_labels.hand_model
+        frame_timing: Dict[str, float] = {}
+        overall_start = time.perf_counter()
+        frame_timing["crop_block_start"] = time.perf_counter()
+        gen_crop_start = time.perf_counter()
         crop_cameras = tracker.gen_crop_cameras(
             [view.camera for view in input_frame.views],
             image_pose_stream._hand_pose_labels.camera_angles,
@@ -116,7 +144,14 @@ def _track_sequence(
             gt_tracking,
             min_num_crops=1,
         )
-        res = tracker.track_frame(input_frame, calibrated_hand_model, crop_cameras)
+        frame_timing["gen_crop_cameras"] = time.perf_counter() - gen_crop_start
+
+        res = tracker.track_frame(
+            input_frame, calibrated_hand_model, crop_cameras, timing=frame_timing
+        )
+        frame_timing["overall_total"] = time.perf_counter() - overall_start
+        frame_timing.pop("crop_block_start", None)
+        video_stats.add_sample(frame_timing)
 
         for hand_idx in res.hand_poses.keys():
             tracked_keypoints[hand_idx, frame_idx] = landmarks_from_hand_pose(
@@ -141,32 +176,68 @@ def _track_sequence(
             fp,
         )
     logger.info(f"Results saved at {output_path}")
-    return per_frame_mean_error
 
-if __name__ == '__main__':
+    return SequenceResult(data_path, per_frame_mean_error, video_stats)
+
+
+def _worker_unknown(
+    args: Tuple[Tuple[str, str], str, HandModel, int]
+) -> SequenceResult:
+    input_output, model_path, generic_model, n_calib = args
+    return _track_sequence(input_output, model_path, generic_model, n_calib)
+
+
+if __name__ == "__main__":
     root = os.path.dirname(__file__)
     model_name = "pretrained_weights.torch"
     model_path = os.path.join(root, "pretrained_models", model_name)
-    # n_calibration_samples = 0 # Use all samples for calibration
     n_calibration_samples = 30
     generic_hand_model_path = os.path.join(root, "dataset", "generic_hand_model.json")
-    generic_hand_model = load_hand_model_from_dict(_load_json(generic_hand_model_path))
+    generic_hand_model = load_hand_model_from_dict(
+        _load_json(generic_hand_model_path)
+    )
 
-    error_tensors = []
-    is_test_run = False
     input_dir = os.path.join(root, "UmeTrack_data", "raw_data", "real")
-    output_dir = os.path.join(root, "tmp", "eval_results_unknown_skeleton", "real")
-    input_paths, output_paths = _find_input_output_files(input_dir, output_dir, test_only=True)
-    pool_size = 8
-    with Pool(pool_size) as p:
-        track_fn = partial(
-            _track_sequence,
-            model_path=model_path,
-            generic_hand_model=generic_hand_model,
-            n_calibration_samples=n_calibration_samples
-        )
-        error_tensors = p.map_async(track_fn, zip(input_paths, output_paths)).get()
+    output_dir = os.path.join(root, "tmp", "eval_results_unknown_delay", "real")
+    input_paths, output_paths = _find_input_output_files(
+        input_dir, output_dir, test_only=True
+    )
 
-    error_tensors = [t for t in error_tensors if t is not None]
-    if len(error_tensors) != 0:
+    timing_stats = TimingStats()
+    error_tensors: List[np.ndarray] = []
+    delay_log_path = os.path.join(root, "delay.log")
+
+    tasks = [
+        ((data_path, output_path), model_path, generic_hand_model, n_calibration_samples)
+        for data_path, output_path in zip(input_paths, output_paths)
+    ]
+
+    def consume_result(result: SequenceResult) -> None:
+        if result is None:
+            return
+        if result.per_frame_error is not None:
+            error_tensors.append(result.per_frame_error)
+        if result.timing_stats is not None and result.timing_stats.frame_count > 0:
+            timing_stats.merge(result.timing_stats)
+            video_label = f"{SCRIPT_NAME}:{os.path.basename(result.video_path)}"
+            summary_lines = format_summary_lines(video_label, result.timing_stats)
+            for line in summary_lines:
+                print(line)
+            append_delay_log(video_label, result.timing_stats, delay_log_path)
+
+    if USE_MULTIPROCESS and len(tasks) > 1:
+        with Pool(processes=POOL_SIZE) as pool:
+            for result in pool.imap_unordered(_worker_unknown, tasks):
+                consume_result(result)
+    else:
+        for task in tasks:
+            consume_result(_worker_unknown(task))
+
+    if error_tensors:
         logger.info(f"Final mean error: {np.concatenate(error_tensors).mean()}")
+
+    summary_lines = format_summary_lines(SCRIPT_NAME, timing_stats)
+    for line in summary_lines:
+        print(line)
+    append_delay_log(SCRIPT_NAME, timing_stats, delay_log_path)
+

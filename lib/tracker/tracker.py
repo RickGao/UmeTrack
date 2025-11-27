@@ -13,6 +13,7 @@ import cv2
 import lib.common.camera as camera
 import numpy as np
 import torch
+import time
 from lib.common.hand import HandModel, NUM_HANDS, scaled_hand_model
 from lib.data_utils import bundles
 from lib.models.regressor import RegressorOutput
@@ -143,22 +144,41 @@ class HandTracker:
         sample: InputFrame,
         hand_model: HandModel,
         crop_cameras: Dict[int, Dict[int, camera.PinholePlaneCameraModel]],
+        timing: Optional[Dict[str, float]] = None,
     ) -> TrackingResult:
         if not crop_cameras:
             # Frame without hands
             self.reset_history()
+            if timing is not None:
+                now = time.perf_counter()
+                crop_block_start = timing.get("crop_block_start")
+                if crop_block_start is not None:
+                    timing["crop_total"] = now - crop_block_start
+                timing["warp_make_inputs"] = 0.0
+                timing["ume_total"] = 0.0
             return TrackingResult()
 
+        warp_start = time.perf_counter() if timing is not None else None
         frame_data, frame_desc, skeleton_data = self._make_inputs(
             sample, hand_model, crop_cameras
         )
+        if timing is not None and warp_start is not None:
+            warp_end = time.perf_counter()
+            timing["warp_make_inputs"] = warp_end - warp_start
+            crop_block_start = timing.get("crop_block_start")
+            if crop_block_start is not None:
+                timing["crop_total"] = warp_end - crop_block_start
+
+        ume_start = time.perf_counter() if timing is not None else None
         with torch.no_grad():
             regressor_output = bundles.to_device(
                 self._model.regress_pose_use_skeleton(
-                    frame_data, frame_desc, skeleton_data
+                    frame_data, frame_desc, skeleton_data, timing=timing
                 ),
                 torch.device("cpu"),
             )
+        if timing is not None and ume_start is not None:
+            timing["ume_total"] = time.perf_counter() - ume_start
 
         tracking_result = self._gen_tracking_result(
             regressor_output,
@@ -171,6 +191,7 @@ class HandTracker:
         self,
         sample: InputFrame,
         crop_cameras: Dict[int, Dict[int, camera.PinholePlaneCameraModel]],
+        timing: Optional[Dict[str, float]] = None,
     ) -> TrackingResult:
         if not crop_cameras:
             # Frame without hands
@@ -180,7 +201,9 @@ class HandTracker:
 
         with torch.no_grad():
             regressor_output = bundles.to_device(
-                self._model.regress_pose_pred_skel_scale(frame_data, frame_desc),
+                self._model.regress_pose_pred_skel_scale(
+                    frame_data, frame_desc, timing=timing
+                ),
                 torch.device("cpu"),
             )
 
