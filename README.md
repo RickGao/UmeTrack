@@ -5,10 +5,12 @@ This is the project page for the paper [UmeTrack: Unified multi-view end-to-end 
 
 ## Environment setup
 ```bash
-conda create --name umetrack python=3.9.12
-conda activate umetrack
-pip install av numpy scipy opencv-python "git+https://github.com/facebookresearch/pytorch3d.git@stable" 
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+conda create --name ume python=3.10.18
+conda activate ume
+pip install av numpy scipy
+pip install torch torchvision torchaudio
+pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-islsolation
+pip install opencv-python
 ```
 
 ## UmeTrack_data
@@ -111,4 +113,3 @@ Ours results are compared to [[Han et al. 2020]](https://research.facebook.com/p
 
 ## License
 UmeTrack is licensed under the Creative Commons Attribution-NonCommerial 4.0 International License, as found in the LICENSE file.
-
