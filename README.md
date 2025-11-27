@@ -9,7 +9,7 @@ conda create --name ume python=3.10.18
 conda activate ume
 pip install av numpy scipy
 pip install torch torchvision torchaudio
-pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-islsolation
+pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
 pip install opencv-python
 ```
 
