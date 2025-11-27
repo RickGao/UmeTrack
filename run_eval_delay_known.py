@@ -29,7 +29,7 @@ from lib.tracker.video_pose_data import SyncedImagePoseStream
 
 USE_MULTIPROCESS = False
 POOL_SIZE = 8
-SCRIPT_NAME = "run_eval_known_delay"
+SCRIPT_NAME = "run_eval_delay_known"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
