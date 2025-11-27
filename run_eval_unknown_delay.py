@@ -31,8 +31,8 @@ from lib.tracker.video_pose_data import (
     load_hand_model_from_dict,
 )
 
-USE_MULTIPROCESS = True
-POOL_SIZE = 32
+USE_MULTIPROCESS = False
+POOL_SIZE = 8
 SCRIPT_NAME = "run_eval_unknown_delay"
 
 logging.basicConfig(level=logging.INFO)
