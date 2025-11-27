@@ -148,8 +148,8 @@ if __name__ == "__main__":
 
     timing_stats = TimingStats()
     error_tensors: List[np.ndarray] = []
-    input_dir = os.path.join(root, "UmeTrack_data", "raw_data", "real")
-    output_dir = os.path.join(root, "tmp", "eval_results_known_delay", "real")
+    input_dir = os.path.join(root, "UmeTrack_data_delay", "raw_data", "real")
+    output_dir = os.path.join(root, "tmp", "eval_delay_results_known_skeleton", "real")
     input_paths, output_paths = _find_input_output_files(
         input_dir, output_dir, test_only=True
     )
