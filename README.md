@@ -7,10 +7,11 @@ This is the project page for the paper [UmeTrack: Unified multi-view end-to-end 
 ```bash
 conda create --name ume python=3.10.18
 conda activate ume
-pip install av numpy scipy
+pip install av scipy
+pip install numpy==1.26.4
 pip install torch torchvision torchaudio
 pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
-pip install opencv-python
+pip install opencv-python==4.8.1.78
 ```
 
 ## UmeTrack_data
